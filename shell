@@ -1,0 +1,2 @@
+#!/bin/sh
+LD_LIBRARY_PATH=$HOME/hadoop-3.1.0/lib/native:$LD_LIBRARY_PATH $SPARK_HOME/bin/spark-shell --master spark://pollux:7077 --executor-memory 25g --driver-memory 25g --jars spark/target/scala-2.11/simple-project_2.11-1.0.jar,spark/lib/stanford-corenlp-3.8.0.jar -feature -i init.scala
