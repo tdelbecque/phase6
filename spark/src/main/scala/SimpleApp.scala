@@ -166,12 +166,14 @@ object X {
     session.sqlContext.read.option ("path", patternReplacementPath).load.as[OrigRecord]
   }
 
-  def loadTokenized (implicit session: SparkSession) = {
+  def loadTokenized (savePath: String = tokenizedPath) 
+    (implicit session: SparkSession) = {
     import session.implicits._
-    session.sqlContext.read.option ("path", tokenizedPath).load.map (_ getSeq[String] (0))
+    session.sqlContext.read.option ("path", savePath).load.map (_ getSeq[String] (0))
   }
 
-  def tokenizePerSentenceAndSave (data: OrigDataSet) (implicit session: SparkSession) : Unit = {
+  def tokenizePerSentenceAndSave (data: OrigDataSet, savePath: String = tokenizedPath) 
+    (implicit session: SparkSession) : Unit = {
     import session.implicits._
     val tokenized = data mapPartitions { it => {
       val props = new Properties ()
@@ -186,12 +188,12 @@ object X {
         ).toList).toList
       }
     }}
-    tokenized.write.option ("path", tokenizedPath) save
+    tokenized.write.option ("path", savePath) save
   }
 
-  def computeEmbedding (embeddingSize: Int = 20, numPartitions: Int = 16, sample: Double = 1.0) 
+  def computeEmbedding (embeddingSize: Int = 20, numPartitions: Int = 16, sample: Double = 1.0, savePath: String = tokenizedPath) 
     (implicit session: SparkSession) = {
-    val data = loadTokenized.sample (sample) coalesce 16
+    val data = loadTokenized(savePath).sample (sample) coalesce 16
     val w2v = new Word2Vec ()
     w2v.setNumPartitions (numPartitions)
     w2v.setVectorSize (embeddingSize)
@@ -207,7 +209,7 @@ object X {
   def loadEmbedding (fileName: String = "embedding")
     (implicit session: SparkSession) = {
     import session.implicits._
-    session.sqlContext.read.option ("path", s"$storagePrefix/abstracts_work/$fileName").
+    session.sqlContext.read.option ("path", fileName).
       load.as[(String, Seq[Double])]
   }
   def tokenizePerDocAndSave (data: OrigDataSet) (implicit session: SparkSession) : Unit = {
@@ -226,16 +228,21 @@ object X {
     })
     tokensPerDoc.rdd.coalesce (16).toDF.write.option ("path", tokensPerDocPath) save
   }
-  def loadTokenPerDoc (implicit session: SparkSession) = {
+  def loadTokenPerDoc (savePath: String = tokensPerDocPath) 
+    (implicit session: SparkSession) = {
     import session.implicits._
-    session.sqlContext.read.option("path", tokensPerDocPath).load.coalesce(16).as[(String, String)]
+    session.sqlContext.read.option("path", tokensPerDocPath).load.
+      coalesce(16).as[(String, String)]
   }
 
-  def computeDocEmbeddingAndSave (termEmbeddingStoreName: String, docEmbeddingStoreName: String)
+  def computeDocEmbeddingAndSave (
+    termEmbeddingStoreName: String,
+    docTokenizedStoreName: String,
+    docEmbeddingStoreName: String)
     (implicit session: SparkSession) = {
     import session.implicits._
     val embedding = loadEmbedding (termEmbeddingStoreName)
-    val tokens = loadTokenPerDoc
+    val tokens = loadTokenPerDoc (docTokenizedStoreName)
     val j = tokens.rdd.join (embedding.rdd).
       map {case (t, (pii, v)) => (pii, Array (1.0, v:_*))}
     val docEmbedding = j reduceByKey { (v1: Array[Double], v2: Array[Double]) =>
@@ -243,14 +250,15 @@ object X {
       v1
     }
     docEmbedding.toDF.as[(String, Array[Double])].
-      write.option ("path", s"$workStoragePrefix/$docEmbeddingStoreName"). 
+      write.option ("path", docEmbeddingStoreName). 
       save
   }
 
   def classify (docEmbeddingStoreName: String, trainingProportion: Double) 
     (implicit session: SparkSession) = {
     import session.implicits._
-    val x = session.sqlContext.read.option ("path", s"$workStoragePrefix/$docEmbeddingStoreName").
+    val x = session.sqlContext.read.
+      option ("path", s"$workStoragePrefix/$docEmbeddingStoreName").
       load.as[(String, Array[Double])]
     val targetMap = (x map { case (pii, _) => pii slice (1,9) }).
       distinct.collect.sorted.zipWithIndex.toMap
@@ -261,8 +269,11 @@ object X {
     val Array(training, testing) = data.randomSplit (Array(trainingProportion, 1.0 - trainingProportion))
     val lr = new LogisticRegression ()
     val lrModel = lr.fit (training)
-    (training, testing, lrModel)
+//    val predict = lrModel.transform (testing).as[(Double, Vector, Vector, Vector, Double)].
+//      map { x => (x._1, x._5) }
+    (training, testing, lrModel, targetMap)
   }
+
 }
 
 class A (implicit session: SparkSession) {
@@ -318,7 +329,8 @@ object SimpleApp {
         )
       }
     })
-    tokensPerDoc.write.option("path", "hdfs://pollux:54310/user/thierry/test/").
+    tokensPerDoc.write.
+      option("path", "hdfs://pollux:54310/user/thierry/test/").
       saveAsTable (out)
   }
 
