@@ -17,23 +17,42 @@ case class TrainedModel (
   model: LogisticRegressionModel
 )
 
-object HuguesAbstracts {
+object HuguesAbstracts extends OrigDataSource {
 
   val storagePrefix = X.storagePrefix + "/data-hugues"
   val path = storagePrefix + "/tsv"
   val replacementPath = storagePrefix + "/replacement"
   val tokenizedPath = storagePrefix + "/tokenized"
 
-  def readOrigData (implicit session: SparkSession) : OrigDataSet = {
+  /**
+    *  reads the original file and provides a Dataset[OrigRecord] (~ OrigDataSet)
+    */
+  def readOrigData (implicit session: SparkSession) : OrigDataSet = 
+    getOrigDataSet (path, 6)
+
+  def readOrigData (dataFieldIndice: Int) (implicit session: SparkSession) : OrigDataSet = 
+    getOrigDataSet (path, dataFieldIndice)
+
+  def readOrigDataWithTitle (implicit session: SparkSession) : OrigDataSet = 
+    getOrigDataSet (path, 1)
+
+  def getOrigDataSet (path: String, dataFieldIndice: Int) 
+    (implicit session: SparkSession) : OrigDataSet = {
     import session.implicits._
     val x = session.sqlContext.read.
       option ("header", "true").
       option ("delimiter", "\t").
       csv (path).
-      map { x => OrigRecord (x.getString (0), x.getString(6)) }
+      map { x => OrigRecord (x.getString (0), x.getString(dataFieldIndice)) }
     x
-  }
+ }
 
+  def getOrigDataSet (path: String) (implicit session: SparkSession) =
+    getOrigDataSet (path, 6)
+
+  /**
+    *  replaces patterns in abstracts, and save it
+    */
   def createAndSaveReplacement (savePath: String = replacementPath) 
     (implicit a: A, session: SparkSession) {
     val orig = readOrigData
@@ -41,7 +60,10 @@ object HuguesAbstracts {
     replacement.write.option ("path", savePath).save
   }
 
-  def loadPatternreplacements (savePath: String = replacementPath) 
+  /**
+    *  load the replacement file
+    */
+  def loadPatternReplacements (savePath: String = replacementPath) 
     (implicit session: SparkSession) : OrigDataSet = {
     import session.implicits._
     session.sqlContext.read.option ("path", savePath).load.as[OrigRecord]
@@ -124,7 +146,7 @@ object HuguesAbstracts {
 
   def doit (implicit a: A, session: SparkSession) = {
     createAndSaveReplacement ()
-    val replacement = loadPatternreplacements ()
+    val replacement = loadPatternReplacements ()
     tokenizePerSentenceAndSave (replacement)
   }
 }

@@ -161,17 +161,26 @@ object X {
       }
     }
   }
-  def loadPatternreplacements (implicit session: SparkSession) : OrigDataSet = {
+  def loadPatternReplacements (implicit session: SparkSession) : OrigDataSet = {
     import session.implicits._
     session.sqlContext.read.option ("path", patternReplacementPath).load.as[OrigRecord]
   }
 
+  /**
+    * @return a Dataset[Seq[String]]
+    */
   def loadTokenized (savePath: String = tokenizedPath) 
     (implicit session: SparkSession) = {
     import session.implicits._
     session.sqlContext.read.option ("path", savePath).load.map (_ getSeq[String] (0))
   }
 
+  /**
+    * Annotate with Stanford core NLP. 
+    * Save a dataset of rows, where each row is an array of terms in a sentence.
+    * So each row in this dataset stands for a line in a doc of the corpus.
+    * (the pii is lost)
+    */
   def tokenizePerSentenceAndSave (data: OrigDataSet, savePath: String = tokenizedPath) 
     (implicit session: SparkSession) : Unit = {
     import session.implicits._
@@ -191,7 +200,10 @@ object X {
     tokenized.write.option ("path", savePath) save
   }
 
-  def computeEmbedding (embeddingSize: Int = 20, numPartitions: Int = 16, sample: Double = 1.0, savePath: String = tokenizedPath) 
+  /**
+    *  Word2Vec word embedding on a tokenized dataset
+    */
+  def computeWordEmbedding (embeddingSize: Int = 20, numPartitions: Int = 16, sample: Double = 1.0, savePath: String = tokenizedPath) 
     (implicit session: SparkSession) = {
     val data = loadTokenized(savePath).sample (sample) coalesce 16
     val w2v = new Word2Vec ()
@@ -199,19 +211,25 @@ object X {
     w2v.setVectorSize (embeddingSize)
     w2v.fit(data.rdd)
   }
-  def saveEmbedding (model: Word2VecModel, fileName: String = "embedding")
+
+  /**
+    *  Saves the vector for each term 
+    */
+  def saveWordEmbedding (model: Word2VecModel, fileName: String = "embedding")
     (implicit session: SparkSession) = {
     import session.implicits._
     session.sparkContext.parallelize (model.getVectors.toList).toDF.as[(String, List[String])].
       write.option ("path", s"$storagePrefix/abstracts_work/$fileName").
       save
   }
-  def loadEmbedding (fileName: String = "embedding")
+  def loadWordEmbedding (fileName: String = "embedding")
     (implicit session: SparkSession) = {
     import session.implicits._
     session.sqlContext.read.option ("path", fileName).
       load.as[(String, Seq[Double])]
   }
+
+
   def tokenizePerDocAndSave (data: OrigDataSet) (implicit session: SparkSession) : Unit = {
     import session.implicits._
     val tokensPerDoc = data mapPartitions (it => {
@@ -241,7 +259,7 @@ object X {
     docEmbeddingStoreName: String)
     (implicit session: SparkSession) = {
     import session.implicits._
-    val embedding = loadEmbedding (termEmbeddingStoreName)
+    val embedding = loadWordEmbedding (termEmbeddingStoreName)
     val tokens = loadTokenPerDoc (docTokenizedStoreName)
     val j = tokens.rdd.join (embedding.rdd).
       map {case (t, (pii, v)) => (pii, Array (1.0, v:_*))}
