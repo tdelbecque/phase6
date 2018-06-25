@@ -1,12 +1,15 @@
 package com.sodad.abstracts
 
 import java.util.Properties
-import java.io._
+import java.io.{
+  File, PrintWriter, 
+  ObjectInputStream, ObjectOutputStream, 
+  FileInputStream, FileOutputStream }
 import org.apache.hadoop.fs.{FileSystem => HadoopFS, Path => HadoopPath}
 import edu.stanford.nlp.pipeline._
 import edu.stanford.nlp.ling.CoreAnnotations._
 import scala.collection.JavaConversions._
-import org.apache.spark.sql.{Dataset, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 import org.apache.spark.mllib.feature.{Word2Vec, Word2VecModel}
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.ml.classification.{LogisticRegression, LogisticRegressionModel}
@@ -40,6 +43,13 @@ case class ChemicalExtractRecord (
   pii: String,
   abstr: String,
   tags: Array[ChemSpotTag])
+
+case class ExportChemicalsRecord (
+  pii: String,
+  text: String,
+  _type: String,
+  before: String = "",
+  after: String = "")
 
 case class TokenizedRecord (
   pii: String,
@@ -136,6 +146,35 @@ object Application {
     (implicit session: SparkSession) : Dataset[ChemicalExtractRecord] = 
     extractChemical (loadOrigDataSet (path), maybeSavePath)
 
+  def exportChemical (
+    data: Dataset[ChemicalExtractRecord], 
+    before: Int = 0, 
+    after: Int = 0, 
+    maybeSavePath: Option[String] = None) 
+    (implicit session: SparkSession) : Seq[ExportChemicalsRecord] = {
+    import session.implicits._
+    import scala.math.{min, max}
+    val ret = data.flatMap { x =>
+      x.tags.map { t =>
+        val beforeStr = x.abstr.substring (max (t.start - before, 0), t.start)
+        val afterStr = x.abstr.substring (
+          min (t.end, x.abstr.length),
+          min (t.end + after, x.abstr.length))
+        ExportChemicalsRecord (x pii, t text, t _type, beforeStr, afterStr )
+      }
+    }.collect
+
+    maybeSavePath foreach { path =>
+      Control.using (new PrintWriter (new File (path))) { f =>
+        f.println ("pii\ttype\tbefore\ttext\tafter")
+        ret foreach { l =>
+          f.println (s"${l pii}\t${l _type}\t${l before}\t${l text}\t${l after}")
+        }
+      }
+    }
+    ret
+  }
+
   def loadChemical (path: String)
     (implicit session: SparkSession) : Dataset[ChemicalExtractRecord] = {
     import session.implicits._
@@ -191,6 +230,74 @@ object Application {
       replacement.write.option ("path", path) save
     }
     replacement
+  }
+
+  def posTag (data: OrigDataSet)(implicit session: SparkSession) = {
+    import session.implicits._
+    val posMap = Map(
+      "VB" -> "verb",
+      "VBD" -> "verb",
+      "VBG" -> "verb",
+      "VBN" -> "verb",
+      "VBZ" -> "verb",
+      "VBP" -> "verb",
+      "VD" -> "verb",
+      "VDD" -> "verb",
+      "VDG" -> "verb",
+      "VDN" -> "verb",
+      "VDZ" -> "verb",
+      "VDP" -> "verb",
+      "VH" -> "verb",
+      "VHD" -> "verb",
+      "VHG" -> "verb",
+      "VHN" -> "verb",
+      "VHZ" -> "verb",
+      "VHP" -> "verb",
+      "VV" -> "verb",
+      "VVD" -> "verb",
+      "VVG" -> "verb",
+      "VVN" -> "verb",
+      "VVP" -> "verb",
+      "VVZ" -> "verb",
+      "NN" -> "noun",
+      "NNS" -> "noun",
+      "NP" -> "noun",
+      "NPS" -> "noun",
+      "JJ" -> "adj",
+      "JJR" -> "adj",
+      "JJS" -> "adj",
+      "RB" -> "adv",
+      "RBR" -> "adv",
+      "RBS" -> "adv")
+
+    val x = data mapPartitions { it => 
+      val props = new Properties ()
+      props.put ("annotators", "tokenize, ssplit, pos, lemma")
+      val pipeline = new StanfordCoreNLP (props)
+      it map { case OrigRecord (pii, abstr) =>
+        val ann = new Annotation (abstr)
+        pipeline annotate ann
+        s"$pii\t1\t" + (for (s <- ann get classOf[SentencesAnnotation]) yield (
+          for (t <- s.get (classOf[TokensAnnotation]).map { x => 
+            val tag = posMap.getOrElse (x.tag(), "other")
+            val str = x.originalText () match {
+              case "<" => "//<"
+              case ">" => "//>"
+              case "|" => "//|"
+              case _ => x.originalText ()
+            }
+            val lemma = x.lemma () match {
+              case "<" => "//<"
+              case ">" => "//>"
+              case "|" => "//|"
+              case _ => x.lemma ()
+            }
+            s"<$str|$lemma|$tag|0|0>"
+          })
+          yield t).toList).flatMap { x => x }.toList.mkString (" ")
+      }
+    }
+    x
   }
 
   def tokenizePerSentence (
@@ -321,7 +428,7 @@ object Application {
   def computeDocEmbedding (data: Dataset[JoinWordEmbeddingAndDocWeightsRecord], maybeSavePath: Option[String] = None) 
   (implicit session: SparkSession) : Dataset[DocEmbeddingRecord] = {
     import session.implicits._
-    data.map { x =>
+    val ret = data.map { x =>
       val weight = x.parameters._1
       val embedding = x.parameters._2
       val xs: Array[Double] = Array (
@@ -333,6 +440,79 @@ object Application {
     }.mapValues { xs => 
       Vectors dense xs.tail.map (_/xs.head)
     }.toDF("pii", "embedding").as[DocEmbeddingRecord]
+    maybeSavePath foreach { path => 
+      ret.write.option ("path", path) save
+    }
+    ret
+  }
+
+  def computeLSIDocEmbedding (
+    data: Dataset[WeightedTermRecord],
+    docFreqs: Map[String, Int], 
+    nToKeep: Int,
+    dim: Int,
+    stopWords: Set[String] = Set.empty[String],
+    maybeSavePath: Option[String] = None
+  ) (implicit session: SparkSession) : Dataset[DocEmbeddingRecord] = {
+    import session.implicits._
+    val x: CreateWeightedVectorDataSetRecord = 
+      LSI.createWeightedVectorDataSet (data, docFreqs, nToKeep, stopWords)
+    val v = x.data.rdd
+    val svd = LSI.computeLSI (v, dim)
+    val ret = svd.U.rows.
+      zip (v map (_.pii)).
+      map (x => DocEmbeddingRecord (x._2, Vectors dense x._1.toArray)).
+      toDF("pii", "embedding").
+      as[DocEmbeddingRecord]
+    maybeSavePath foreach { path => 
+      ret.write.option ("path", path) save
+    }
+    ret
+  }
+
+  /**
+    *  creates a text data file, comma separated.
+    *  each row starts with the head category of the journal, when the journal 
+    *  belongs to an unique category.
+    *  When the journal does not belong to a unique category, or the category was not found, 
+    *  a special code is used (the upper value of the categories codes + 1)
+    *  Following values are the embedding coordinates.
+    */
+  def setHC (data: Dataset[DocEmbeddingRecord]) (implicit session: SparkSession) = {
+    import session.implicits._
+    val categories = HeadCategories.createMainCategories
+    val multiCategory = categories._1.size
+    val categoriesMap : Map[String, Int] = HeadCategories.readMainCategories.mapValues { x =>
+      if (x.categories.size == 1) categories._2 (x.categories (0))
+      else multiCategory
+    } map identity
+
+    data.map { x =>
+      ((categoriesMap.get (x.pii.substring (1,9)) match {
+        case Some (c) => c
+        case _ => multiCategory
+      }) +: x.embedding.toArray) mkString ","
+    }
+  }
+
+  def addHC (data: Dataset[DocEmbeddingRecord]) 
+    (implicit session: SparkSession) : DataFrame = {
+    import session.implicits._
+    val categories = HeadCategories.createMainCategories
+    val multiCategory = categories._1.size
+    val categoriesMap : Map[String, Int] = HeadCategories.readMainCategories.mapValues { x =>
+      if (x.categories.size == 1) categories._2 (x.categories (0))
+      else multiCategory
+    } map identity
+
+    data.map { x => (
+      x.pii,
+      categoriesMap.get (x.pii.substring (1,9)) match {
+        case Some (c) => c
+        case _ => multiCategory
+      },
+      x.embedding)
+    }.toDF ("pii", "category", "embedding")
   }
 
   def createJournalClassifierTrainingDataSet (
@@ -504,5 +684,6 @@ object Application {
         null
     d2
   }
+
 }
 
