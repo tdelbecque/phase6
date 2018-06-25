@@ -1,2 +1,5 @@
 #!/bin/sh
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$HOME/hadoop-3.1.0/lib/native:$LD_LIBRARY_PATH $SPARK_HOME/bin/spark-shell --master spark://pollux:7077 --executor-memory 25g --driver-memory 25g --jars spark/target/scala-2.11/simple-project_2.11-1.0.jar,spark/lib/stanford-corenlp-3.8.0.jar -feature -i init.scala
+
+LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$HOME/hadoop-3.1.0/lib/native:$LD_LIBRARY_PATH $SPARK_HOME/bin/spark-shell --master spark://pollux:7077 --executor-memory 25g --driver-memory 25g --jars spark/target/scala-2.11/simple-project_2.11-1.0.jar,spark/lib/stanford-corenlp-3.8.0.jar,/home/thierry/chemspot-2.0/chemspot.jar,spark/lib/stanford-corenlp-3.8.0-models.jar --files spark/lib/stanford-corenlp-3.8.0-models.jar -feature -i init.scala
+
+#,/home/thierry/Elsevier/abstracts/index/target/scala-2.12/indexer-assembly-0.1.jar
