@@ -36,6 +36,12 @@ object HuguesAbstracts extends OrigDataSource {
   def readOrigDataWithTitle (implicit session: SparkSession) : OrigDataSet = 
     getOrigDataSet (path, 1)
 
+  def readOrigDataWithAbstract (implicit session: SparkSession) : OrigDataSet =
+    getOrigDataSet (path, 6)
+
+  def readOrigDataWithJournal (implicit session: SparkSession) : OrigDataSet = 
+    getOrigDataSet (path, 4)
+
   def getOrigDataSet (path: String, dataFieldIndice: Int) 
     (implicit session: SparkSession) : OrigDataSet = {
     import session.implicits._

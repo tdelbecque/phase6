@@ -74,7 +74,10 @@ case class LogisticRegressionRecord (
   predict: Dataset[(Double, Double)],
   model: LogisticRegressionModel)
 
+case class TagTitleAbstractAndSaveRecord (pii: String, issn: String, title: String, abstr: String)
+
 case class DoItConfiguration (
+  val extractChemical: Boolean = false,
   val runLSI: Boolean = false,
   val lsiNToKeep: Int = 10000,
   val lsiDim: Int = 100,
@@ -232,7 +235,60 @@ object Application {
     replacement
   }
 
-  def posTag (data: OrigDataSet)(implicit session: SparkSession) = {
+  def annToStr (ann: Annotation) : String = {
+    val posMap = Map(
+      "VB" -> "verb", "VBD" -> "verb", "VBG" -> "verb", "VBN" -> "verb", "VBZ" -> "verb",
+      "VBP" -> "verb", "VD" -> "verb", "VDD" -> "verb", "VDG" -> "verb", "VDN" -> "verb",
+      "VDZ" -> "verb", "VDP" -> "verb", "VH" -> "verb", "VHD" -> "verb", "VHG" -> "verb",
+      "VHN" -> "verb", "VHZ" -> "verb", "VHP" -> "verb", "VV" -> "verb", "VVD" -> "verb",
+      "VVG" -> "verb", "VVN" -> "verb", "VVP" -> "verb", "VVZ" -> "verb", "NN" -> "noun",
+      "NNS" -> "noun", "NP" -> "noun", "NPS" -> "noun", "JJ" -> "adj", "JJR" -> "adj",
+      "JJS" -> "adj", "RB" -> "adv", "RBR" -> "adv", "RBS" -> "adv")
+
+    (for (s <- ann get classOf[SentencesAnnotation]) yield (
+      for (t <- s.get (classOf[TokensAnnotation]).map { x =>
+        val tag = posMap.getOrElse (x.tag(), "other")
+        val str = x.originalText () match {
+          case "<" => "//<"
+          case ">" => "//>"
+          case "|" => "//|"
+          case _ => x.originalText ()
+        }
+        val lemma = x.lemma () match {
+          case "<" => "//<"
+          case ">" => "//>"
+          case "|" => "//|"
+          case _ => x.lemma ()
+        }
+        s"<$str|$lemma|$tag|0|0>"
+      })
+      yield t).toList).flatMap { x => x }.toList.mkString (" ")
+  }
+
+  def foo (implicit session: SparkSession) = {
+    import session.implicits._
+    val props = new Properties ()
+    props.put ("annotators", "tokenize, ssplit, pos, lemma")
+    val pipeline = new StanfordCoreNLP (props)
+
+    val x = session.sqlContext.read.
+      option ("header", "true").
+      option ("delimiter", "\t").
+      csv (HuguesAbstracts.path).
+      collect.
+      map { x => 
+        val titleAnn = new Annotation (x getString 1)
+        val abstrAnn = new Annotation (x getString 6)
+        pipeline annotate titleAnn
+        val titleAnnotated = annToStr (titleAnn)
+        pipeline annotate abstrAnn
+        val abstrAnnotated = annToStr (abstrAnn)
+        s"${x getString 0}\t${x getString 3}\t${titleAnnotated}\t${abstrAnnotated}"
+      }
+  }
+
+  def posTag (data: OrigDataSet)(implicit session: SparkSession) 
+      : Dataset[String] = {
     import session.implicits._
     val posMap = Map(
       "VB" -> "verb",
@@ -300,6 +356,97 @@ object Application {
     x
   }
 
+  def posTag_2 (data: OrigDataSet)(implicit session: SparkSession) 
+      : Dataset[(String, String)] = {
+    import session.implicits._
+    val posMap = Map(
+      "VB" -> "verb",
+      "VBD" -> "verb",
+      "VBG" -> "verb",
+      "VBN" -> "verb",
+      "VBZ" -> "verb",
+      "VBP" -> "verb",
+      "VD" -> "verb",
+      "VDD" -> "verb",
+      "VDG" -> "verb",
+      "VDN" -> "verb",
+      "VDZ" -> "verb",
+      "VDP" -> "verb",
+      "VH" -> "verb",
+      "VHD" -> "verb",
+      "VHG" -> "verb",
+      "VHN" -> "verb",
+      "VHZ" -> "verb",
+      "VHP" -> "verb",
+      "VV" -> "verb",
+      "VVD" -> "verb",
+      "VVG" -> "verb",
+      "VVN" -> "verb",
+      "VVP" -> "verb",
+      "VVZ" -> "verb",
+      "NN" -> "noun",
+      "NNS" -> "noun",
+      "NP" -> "noun",
+      "NPS" -> "noun",
+      "JJ" -> "adj",
+      "JJR" -> "adj",
+      "JJS" -> "adj",
+      "RB" -> "adv",
+      "RBR" -> "adv",
+      "RBS" -> "adv")
+
+    val x = data mapPartitions { it => 
+      val props = new Properties ()
+      props.put ("annotators", "tokenize, ssplit, pos, lemma")
+      val pipeline = new StanfordCoreNLP (props)
+      it map { case OrigRecord (pii, abstr) =>
+        val ann = new Annotation (abstr)
+        pipeline annotate ann
+        (pii, (for (s <- ann get classOf[SentencesAnnotation]) yield (
+          for (t <- s.get (classOf[TokensAnnotation]).map { x => 
+            val tag = posMap.getOrElse (x.tag(), "other")
+            val str = x.originalText () match {
+              case "<" => "//<"
+              case ">" => "//>"
+              case "|" => "//|"
+              case _ => x.originalText ()
+            }
+            val lemma = x.lemma () match {
+              case "<" => "//<"
+              case ">" => "//>"
+              case "|" => "//|"
+              case _ => x.lemma ()
+            }
+            s"<$str|$lemma|$tag|0|0>"
+          })
+          yield t).toList).flatMap { x => x }.toList.mkString (" ")
+        )
+      }
+    }
+    x
+  }
+
+  def posTagTitleAbstractAndSave (maybeSavePath: Option[String]) 
+    (implicit session: SparkSession) : Dataset[TagTitleAbstractAndSaveRecord]
+  = {
+    import session.implicits._
+    val posTitle = posTag_2 (HuguesAbstracts.readOrigDataWithTitle).
+      toDF ("pii", "title")
+    val posAbstract = posTag_2 (HuguesAbstracts.readOrigDataWithAbstract).
+      toDF ("pii", "abstr")
+    val issns = HuguesAbstracts.readOrigData(3).
+      toDF ("pii", "issn")
+    val ret = posTitle.join (posAbstract, "pii").join (issns, "pii").
+      as[TagTitleAbstractAndSaveRecord]
+    maybeSavePath foreach { path => 
+      ret.cache ()
+      Control.using (new java.io.BufferedWriter (new java.io.FileWriter (path))) { f =>
+        ret.collect.foreach { x =>
+          f write s"${x.pii}\t${x.issn}\t${x.title}\t${x.abstr}"
+          f newLine } } }
+    ret
+  }
+ 
   def tokenizePerSentence (
     data: OrigDataSet, 
     maybeTransformer: Option[Transformer], 
@@ -584,17 +731,21 @@ object Application {
 
     val d1 : OrigDataSet = maybeData.getOrElse (HuguesAbstracts.readOrigData)
 
-    val d2 : Dataset[ChemicalExtractRecord] = 
-      if (hfs.exists (chemicalPath)) {
-        logReading (chemicalPath)
-        readFrom(chemicalPath).as[ChemicalExtractRecord]
-      } else {
-        logBuilding (chemicalPath)
-        extractChemical (d1, chemicalPath)
-      }
+    val d2 : Option[Dataset[ChemicalExtractRecord]] =
+      if (configuration.extractChemical)
+        Some ( 
+          if (hfs.exists (chemicalPath)) {
+            logReading (chemicalPath)
+            readFrom(chemicalPath).as[ChemicalExtractRecord]
+          } else {
+            logBuilding (chemicalPath)
+            extractChemical (d1, chemicalPath)
+          }
+        )
+      else
+        None
 
-    val d3 : OrigDataSet = 
-      replaceChemical (d2, None)
+    val d3 : OrigDataSet = d2.map (replaceChemical (_ , None)).getOrElse (d1)
 
     val d4 : OrigDataSet = 
       if (hfs.exists (replacementPath)) {
@@ -687,3 +838,49 @@ object Application {
 
 }
 
+/**
+  *  Compute doc embedding based on abstracts, and train a lr model to predict journal
+  */
+object ProcessAbstracts {
+  def doit (implicit session: SparkSession) = {
+    import session.implicits._
+    import Control.using
+    import java.io.{ObjectOutputStream, FileOutputStream}
+
+    Application.doit ("w2v_100_abstracts", Some (HuguesAbstracts.readOrigDataWithAbstract))
+    val tokenized = session.sqlContext.read.option ("path", "w2v_100_abstracts/tokenized").
+      load.as[TokenizedRecord]
+    val w2v_model = Application.computeWordEmbedding (tokenized, 100)
+    using (new ObjectOutputStream (new FileOutputStream ("work/w2v_100_abstracts/w2v_model"))) { f =>
+      f.writeObject (w2v_model)
+    }
+    session.sparkContext.parallelize (w2v_model.getVectors.toList).toDF.
+      write.option ("path", "w2v_100_abstracts/w2v_100").save
+    val wordEmbeddingAndDocWeights = Application.
+      joinWordEmbeddingAndDocWeights ("w2v_100_abstracts/w2v_100", "w2v_100_abstracts/tfidf-weighted")
+    val docEmbedding = Application.computeDocEmbedding (wordEmbeddingAndDocWeights)
+    docEmbedding.toDF.write.option ("path", "w2v_100_abstracts/doc-embedding") save
+    val lr = Application.computeLogisticRegressionModel ("w2v_100_abstracts/w2v_100", "w2v_100_abstracts/tfidf-weighted")
+    lr.predict.toDF.write.option ("path", "w2v_100_abstracts/logistic-regression/predict").save
+    lr.model.save ("w2v_100_abstracts/logistic-regression/model")
+    ProcessAbstracts.exportModelData (Some("work/w2v_100_abstracts/model-data"))
+  }
+
+  def exportModelData (maybeSavePath: Option[String]) (implicit session: SparkSession) = {
+    import session.implicits._
+    val docEmbedding = session.sqlContext.read.option ("path", "w2v_100_abstracts/doc-embedding").
+      load.as[DocEmbeddingRecord].
+      map {x => (x pii, x embedding)}
+    val issn = HuguesAbstracts.readOrigData (3).map {x => (x.pii, x.abstr)}
+    val values = docEmbedding.rdd.join (issn.rdd).map { x => 
+      val positionStr = x._2._1.toArray mkString "\t"
+      s"${x._2._2}\t$positionStr"
+    }
+    maybeSavePath foreach { path => 
+      Control.using (new java.io.PrintWriter (path)) { f =>
+        values.collect.foreach (f println _)
+      }
+    }
+    values
+  }
+}
